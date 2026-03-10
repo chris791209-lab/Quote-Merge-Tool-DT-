@@ -3,33 +3,50 @@ import pandas as pd
 import io
 
 st.set_page_config(page_title="報價單自動合併小工具", page_icon="📦", layout="wide")
-st.title("📦 報價單自動合併小工具 (新版)")
-st.write("支援舊版獨立報價單，以及全新 **DT BUY TRIP 統一格式**！只要上傳包含多個分頁的 Excel，系統會自動幫您抓取全部資料合併！")
+st.title("📦 報價單萬用合併平台 (支援跨部門與多客戶)")
+st.write("請先選擇您要處理的專案類型，再上傳多份工廠報價單。系統將自動判斷並產出對應的總表格式！")
 
-# 最終 Master Sheet 需要的欄位
-master_cols = ['#', 'Vendor:', 'Vendor Stock #:', 'Item Description:', 'FOB:', 
-               'Product Size (In/Cm):', 'Material Content All Parts:', 'Part Counts/Specs:', 
-               'Master Pk:', 'Inner Pk:', 'Unit Package Type & Quality:', 'Display Type / Quality:', 
-               'Notes / MOQ / Leadtime:', 'New Item ', 'Existing SKU#: ', 'Country of Origin: ', 
-               'ELC:', 'Weight (G/Lb):', 'Size:']
+# ================= 定義兩種輸出的標準欄位 =================
+dt_master_cols = [
+    '#', 'Vendor:', 'Vendor Stock #:', 'Item Description:', 'FOB:', 
+    'Product Size (In/Cm):', 'Material Content All Parts:', 'Part Counts/Specs:', 
+    'Master Pk:', 'Inner Pk:', 'Unit Package Type & Quality:', 'Display Type / Quality:', 
+    'Notes / MOQ / Leadtime:', 'New Item ', 'Existing SKU#: ', 'Country of Origin: ', 
+    'ELC:', 'Weight (G/Lb):', 'Size:'
+]
+
+tg_cost_cols = [
+    'FACTORY#', 'VENDOR STYLE#', 'CATEGORY', 'DESCRIPTION', 'IMAGES', 
+    'QUOTE REMARK', 'LINE PLAN QTY', 'MOLD FEE', 'FCA COST', 'GMI printed ', 
+    'GMI-non printed', 'Film plate cost/mould fee', 'Cost of GMI printed package ', 
+    'Cost of GIM-non printed', 'Total Cost', 'profit %', 'FCA', 'RETAIL ', 'IMU', 
+    'Master\nCasepack\nUnit', 'Master\nLength (in)', 'Master\nWidth (in)', 
+    'Master\nHeight (in)', 'Master\nWeight (lb)', 'Inner\nCasepack\nUnit', 
+    'Inner\nLength (in)', 'Inner\nWidth (in)', 'Inner\nHeight (in)', 'Inner\nWeight (lb)'
+]
 
 def format_size(s):
-    """協助把長寬高數字格式化到小數點第二位"""
     try: return f"{float(s):.2f}"
     except: return "" if pd.isna(s) else str(s).strip()
 
-def process_single_df(df_temp, get_full_df_func):
-    """處理單一個工作表的邏輯"""
+def process_single_df(df_temp, get_full_df_func, workflow):
     header_idx = -1
     file_type = None
     
-    # 智慧尋找表頭
+    # 智慧尋找表頭 (針對不同的報價單格式)
     for i in range(min(15, len(df_temp))):
         row_str = " ".join(df_temp.iloc[i].astype(str).tolist())
-        if '工廠代碼/名稱' in row_str or '產品描述' in row_str:
+        # Target (TG) 的表頭特徵
+        if 'Target FTY BPM ID' in row_str or 'FTY Name' in row_str:
+            header_idx = i
+            file_type = 'TG_MASTER'
+            break
+        # Dollar Tree (DT) 新版的表頭特徵
+        elif '工廠代碼/名稱' in row_str or '產品描述' in row_str:
             header_idx = i
             file_type = 'DT_MASTER'
             break
+        # Dollar Tree (DT) 舊版的表頭特徵
         elif '廠名/廠號' in row_str:
             header_idx = i
             file_type = 'AD450'
@@ -45,7 +62,6 @@ def process_single_df(df_temp, get_full_df_func):
     if df.empty: return None
     df = df.dropna(how='all')
     
-    # 模糊搜尋欄位的輔助函數
     def get_col(kw, exact=False):
         if exact:
             matches = [c for c in df.columns if kw == str(c).strip()]
@@ -55,82 +71,96 @@ def process_single_df(df_temp, get_full_df_func):
 
     rename_dict = {}
     
-    if file_type == 'DT_MASTER':
-        vendor_col = get_col('工廠代碼')
-        desc_col = get_col('產品描述')
-        fob_col = get_col('FOB                US$') or get_col('FOB')
-        weight_col = get_col('產品重量')
-        mat_col = get_col('材質分析')
-        inner_col = get_col('內盒數量')
-        master_col = get_col('外箱數量')
-        pkg_col = get_col('包裝明細')
-        lead_col = get_col('大貨生產天數')
-        item_col = get_col('產品編號')
-        
-        # 處理產品尺寸 (L x W x H) - 會精準避開外箱或內盒的長寬高
-        l_col = get_col('L\n(INCH)', exact=True) or get_col('L', exact=False)
-        w_col = get_col('W\n(INCH)', exact=True) or get_col('W', exact=False)
-        h_col = get_col('H\n(INCH)', exact=True) or get_col('H', exact=False)
-        
-        if l_col and w_col and h_col:
-            l = df[l_col].apply(format_size)
-            w = df[w_col].apply(format_size)
-            h = df[h_col].apply(format_size)
-            size_str = l + ' x ' + w + ' x ' + h
-            # 移除空的尺寸組合
-            df['Product Size (In/Cm):'] = size_str.apply(lambda x: "" if x.replace('x', '').replace(' ', '') == '' else x)
+    # ================= 處理流程一：Target (TG) =================
+    if workflow == "Target (TG) ➡️ Cost Analysis 成本分析表":
+        if file_type != 'TG_MASTER': return None # 略過非 TG 格式
         
         rename_dict = {
-            vendor_col: 'Vendor:',
-            item_col: 'Vendor Stock #:',
-            desc_col: 'Item Description:',
-            fob_col: 'FOB:',
-            mat_col: 'Material Content All Parts:',
-            inner_col: 'Inner Pk:',
-            master_col: 'Master Pk:',
-            pkg_col: 'Unit Package Type & Quality:',
-            lead_col: 'Notes / MOQ / Leadtime:',
-            weight_col: 'Weight (G/Lb):'
+            get_col('FTY Name'): 'FACTORY#',
+            get_col('Vendor Style#'): 'VENDOR STYLE#',
+            get_col('Line', exact=True) or get_col('Line'): 'CATEGORY',
+            get_col('Product Name'): 'DESCRIPTION',
+            get_col('Product photo'): 'IMAGES',
+            get_col("Line Plan q'ty"): 'LINE PLAN QTY',
+            get_col('模具費'): 'MOLD FEE',
+            get_col('FCA'): 'FCA COST',
+            get_col('客人售價 Retail:') or get_col('Retail\n建議賣價'): 'RETAIL ',
+            get_col('外箱數量'): 'Master\nCasepack\nUnit',
+            get_col('外箱Length'): 'Master\nLength (in)',
+            get_col('外箱Width'): 'Master\nWidth (in)',
+            get_col('外箱Height'): 'Master\nHeight (in)',
+            get_col('外箱Weight'): 'Master\nWeight (lb)',
+            get_col('內箱數量'): 'Inner\nCasepack\nUnit',
+            get_col('內箱Length'): 'Inner\nLength (in)',
+            get_col('內箱Width'): 'Inner\nWidth (in)',
+            get_col('內箱Height'): 'Inner\nHeight (in)'
         }
         
-    elif file_type == 'AD450':
-        rename_dict = {
-            get_col('廠名/廠號'): 'Vendor:',
-            get_col('品名'): 'Item Description:',
-            get_col('價格'): 'FOB:',
-            get_col('產品尺寸'): 'Product Size (In/Cm):',
-            get_col('產品材質'): 'Material Content All Parts:',
-            get_col('外箱數量'): 'Master Pk:',
-            get_col('內盒數量'): 'Inner Pk:',
-            get_col('包裝明細'): 'Unit Package Type & Quality:',
-            get_col('MOQ'): 'Notes / MOQ / Leadtime:',
-            get_col('產品重量'): 'Weight (G/Lb):'
-        }
-        
-    else: # 其他舊版格式
-        rename_dict = {
-            get_col('工廠 / factory ID'): 'Vendor:',
-            get_col('品名 & 內容描述'): 'Item Description:',
-            get_col('價格 (FOB)'): 'FOB:',
-            get_col('產品規格尺寸'): 'Product Size (In/Cm):',
-            get_col('產品材質'): 'Material Content All Parts:',
-            get_col('外箱數量'): 'Master Pk:',
-            get_col('內盒數量'): 'Inner Pk:',
-            get_col('包裝明細'): 'Unit Package Type & Quality:',
-            get_col('MOQ'): 'Notes / MOQ / Leadtime:',
-            get_col('產品重量'): 'Weight (G/Lb):'
-        }
-        
-    # 清除沒找到的空欄位，並重新命名
-    rename_dict = {k: v for k, v in rename_dict.items() if k is not None}
-    df = df.rename(columns=rename_dict)
-    
-    # 僅留下 Master Sheet 需要的欄位
-    return df[[c for c in master_cols if c in df.columns]]
+        # 獨立尋找內箱重量，避開外箱
+        inner_w_cols = [c for c in df.columns if 'Weight' in str(c) and '外箱' not in str(c)]
+        if inner_w_cols:
+            rename_dict[inner_w_cols[0]] = 'Inner\nWeight (lb)'
+            
+        rename_dict = {k: v for k, v in rename_dict.items() if k is not None}
+        df = df.rename(columns=rename_dict)
+        return df[[c for c in tg_cost_cols if c in df.columns]]
 
+    # ================= 處理流程二：Dollar Tree (DT) =================
+    elif workflow == "Dollar Tree (DT) ➡️ Master Sheet 總表":
+        if file_type == 'TG_MASTER': return None # 略過 TG 格式
+        
+        if file_type == 'DT_MASTER':
+            vendor_col = get_col('工廠代碼')
+            desc_col = get_col('產品描述')
+            fob_col = get_col('FOB                US$') or get_col('FOB')
+            weight_col = get_col('產品重量')
+            mat_col = get_col('材質分析')
+            inner_col = get_col('內盒數量')
+            master_col = get_col('外箱數量')
+            pkg_col = get_col('包裝明細')
+            lead_col = get_col('大貨生產天數')
+            item_col = get_col('產品編號')
+            
+            l_col = get_col('L\n(INCH)', exact=True) or get_col('L', exact=False)
+            w_col = get_col('W\n(INCH)', exact=True) or get_col('W', exact=False)
+            h_col = get_col('H\n(INCH)', exact=True) or get_col('H', exact=False)
+            
+            if l_col and w_col and h_col:
+                l = df[l_col].apply(format_size)
+                w = df[w_col].apply(format_size)
+                h = df[h_col].apply(format_size)
+                size_str = l + ' x ' + w + ' x ' + h
+                df['Product Size (In/Cm):'] = size_str.apply(lambda x: "" if x.replace('x', '').replace(' ', '') == '' else x)
+            
+            rename_dict = {
+                vendor_col: 'Vendor:', item_col: 'Vendor Stock #:', desc_col: 'Item Description:',
+                fob_col: 'FOB:', mat_col: 'Material Content All Parts:', inner_col: 'Inner Pk:',
+                master_col: 'Master Pk:', pkg_col: 'Unit Package Type & Quality:', lead_col: 'Notes / MOQ / Leadtime:', weight_col: 'Weight (G/Lb):'
+            }
+        elif file_type == 'AD450':
+            rename_dict = {
+                get_col('廠名/廠號'): 'Vendor:', get_col('品名'): 'Item Description:', get_col('價格'): 'FOB:',
+                get_col('產品尺寸'): 'Product Size (In/Cm):', get_col('產品材質'): 'Material Content All Parts:',
+                get_col('外箱數量'): 'Master Pk:', get_col('內盒數量'): 'Inner Pk:', get_col('包裝明細'): 'Unit Package Type & Quality:',
+                get_col('MOQ'): 'Notes / MOQ / Leadtime:', get_col('產品重量'): 'Weight (G/Lb):'
+            }
+        else: # 其他舊版格式
+            rename_dict = {
+                get_col('工廠 / factory ID'): 'Vendor:', get_col('品名 & 內容描述'): 'Item Description:',
+                get_col('價格 (FOB)'): 'FOB:', get_col('產品規格尺寸'): 'Product Size (In/Cm):',
+                get_col('產品材質'): 'Material Content All Parts:', get_col('外箱數量'): 'Master Pk:',
+                get_col('內盒數量'): 'Inner Pk:', get_col('包裝明細'): 'Unit Package Type & Quality:',
+                get_col('MOQ'): 'Notes / MOQ / Leadtime:', get_col('產品重量'): 'Weight (G/Lb):'
+            }
+            
+        rename_dict = {k: v for k, v in rename_dict.items() if k is not None}
+        df = df.rename(columns=rename_dict)
+        return df[[c for c in dt_master_cols if c in df.columns]]
 
-def process_files(uploaded_files):
+def process_files(uploaded_files, workflow):
     all_dataframes = []
+    # 根據選擇的流程，決定最終輸出的標準欄位
+    target_cols = tg_cost_cols if "Target" in workflow else dt_master_cols
     
     for file in uploaded_files:
         try:
@@ -140,19 +170,17 @@ def process_files(uploaded_files):
                     file.seek(0)
                     return pd.read_csv(file, header=h_idx)
                 
-                res_df = process_single_df(df_temp, get_full_csv)
+                res_df = process_single_df(df_temp, get_full_csv, workflow)
                 if res_df is not None:
                     all_dataframes.append(res_df)
-                    
             else:
                 excel_file = pd.ExcelFile(file)
-                # 自動歷遍 Excel 內的所有分頁
                 for sheet_name in excel_file.sheet_names:
                     df_temp = excel_file.parse(sheet_name=sheet_name, nrows=15, header=None)
                     def get_full_excel(h_idx, s_name=sheet_name):
                         return excel_file.parse(sheet_name=s_name, header=h_idx)
                         
-                    res_df = process_single_df(df_temp, get_full_excel)
+                    res_df = process_single_df(df_temp, get_full_excel, workflow)
                     if res_df is not None:
                         all_dataframes.append(res_df)
                         
@@ -162,29 +190,46 @@ def process_files(uploaded_files):
     if not all_dataframes: return None
         
     master_df = pd.concat(all_dataframes, ignore_index=True)
-    # 補齊可能缺失的空欄位
-    for col in master_cols:
+    
+    # 補齊可能缺失的空欄位 (確保輸出的表格架構完美符合 Template)
+    for col in target_cols:
         if col not in master_df.columns:
             master_df[col] = ''
             
-    master_df = master_df[master_cols]
-    master_df = master_df.dropna(subset=['Item Description:', 'Vendor:'], how='all')
+    master_df = master_df[target_cols]
+    
+    # 移除全空白列
+    if "Target" in workflow:
+        master_df = master_df.dropna(subset=['DESCRIPTION', 'FACTORY#'], how='all')
+    else:
+        master_df = master_df.dropna(subset=['Item Description:', 'Vendor:'], how='all')
     
     return master_df
 
-uploaded_files = st.file_uploader("📂 點擊或拖曳上傳報價單", accept_multiple_files=True, type=['xlsx', 'xls', 'csv'])
+# ================= 網頁前端介面 =================
+st.markdown("### 1️⃣ 選擇專案工作流程")
+selected_workflow = st.selectbox("請選擇要執行的報價單轉換流程：", [
+    "Target (TG) ➡️ Cost Analysis 成本分析表",
+    "Dollar Tree (DT) ➡️ Master Sheet 總表"
+])
 
-if st.button("🚀 產生 Master Sheet 總表", type="primary"):
+st.markdown("### 2️⃣ 上傳檔案")
+uploaded_files = st.file_uploader("📂 將工廠報價單拖曳至此", accept_multiple_files=True, type=['xlsx', 'xls', 'csv'])
+
+if st.button("🚀 開始彙總產出", type="primary"):
     if not uploaded_files:
         st.warning("請先上傳檔案喔！")
     else:
         with st.spinner("資料處理中，請稍候..."):
-            result_df = process_files(uploaded_files)
+            result_df = process_files(uploaded_files, selected_workflow)
             
             if result_df is not None and not result_df.empty:
-                st.success(f"轉換成功！共處理了 {len(result_df)} 筆商品。")
+                st.success(f"轉換成功！共處理了 {len(result_df)} 筆商品資料。")
                 st.dataframe(result_df)
+                
+                # 依據客戶名稱設定下載檔名
+                file_name = "Cost_Analysis_Data.csv" if "Target" in selected_workflow else "DT_Master_Sheet.csv"
                 csv = result_df.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig')
-                st.download_button("📥 下載 Master_Sheet.csv", data=csv, file_name="Master_Sheet.csv", mime="text/csv")
+                st.download_button(f"📥 下載 {file_name}", data=csv, file_name=file_name, mime="text/csv")
             else:
-                st.warning("沒有找到符合格式的報價資料，請確認檔案內容。")
+                st.warning("沒有找到符合您所選專案格式的報價資料，請確認「工作流程」是否選擇正確，或檢查報價單內容。")
