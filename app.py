@@ -3,7 +3,7 @@ import pandas as pd
 import io
 
 st.set_page_config(page_title="報價單自動合併小工具", page_icon="📦", layout="wide")
-st.title("📦 報價單萬用合併平台 (Excel 輸出升級版)")
+st.title("📦 報價單萬用合併平台")
 st.write("請先選擇您要處理的專案類型，再上傳多份工廠報價單。系統將自動產出可直接貼圖片的 Excel 總表格式！")
 
 # ================= 定義兩種輸出的標準欄位 =================
@@ -239,4 +239,5 @@ if st.button("🚀 開始彙總產出 (Excel 格式)", type="primary"):
                 )
             else:
                 st.warning("沒有找到符合您所選專案格式的報價資料，請確認「工作流程」是否選擇正確，或檢查報價單內容。")
+
 
