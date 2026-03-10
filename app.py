@@ -188,7 +188,7 @@ def process_files(uploaded_files, workflow):
     
     for col in target_cols:
         if col not in master_df.columns:
-            master_df[col] = ''
+            master_df[col] = None
             
     master_df = master_df[target_cols]
     
@@ -239,3 +239,4 @@ if st.button("🚀 開始彙總產出 (Excel 格式)", type="primary"):
                 )
             else:
                 st.warning("沒有找到符合您所選專案格式的報價資料，請確認「工作流程」是否選擇正確，或檢查報價單內容。")
+
